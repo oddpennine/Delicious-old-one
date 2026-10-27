@@ -22,7 +22,7 @@ jobs:
           component="build-au/AncientGrove_artefacts/Release/AU/Ancient Grove.component"
           codesign --force --deep --sign - "$component"
           codesign --verify --deep --strict "$component"
-          lipo -verify_arch arm64 x86_64 "$component/Contents/MacOS/Ancient Grove"
+          lipo "$component/Contents/MacOS/Ancient Grove" -verify_arch arm64 x86_64
           mkdir -p "$HOME/Library/Audio/Plug-Ins/Components"
           ditto "$component" "$HOME/Library/Audio/Plug-Ins/Components/Ancient Grove.component"
           killall AudioComponentRegistrar || true
