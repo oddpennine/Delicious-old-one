@@ -1,0 +1,48 @@
+name: Build Logic AU
+on:
+  push:
+    paths: ['native-au/**', '.github/workflows/build-au.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  au:
+    runs-on: macos-14
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure universal macOS AU
+        run: cmake -S native-au -B build-au -DCMAKE_BUILD_TYPE=Release '-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64' -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+      - name: Build Audio Unit
+        run: cmake --build build-au --config Release --target AncientGrove_AU -j 3
+      - name: Sign, check architectures and validate with Apple auval
+        shell: bash
+        run: |
+          set -euo pipefail
+          component="build-au/AncientGrove_artefacts/Release/AU/Ancient Grove.component"
+          codesign --force --deep --sign - "$component"
+          codesign --verify --deep --strict "$component"
+          lipo -verify_arch arm64 x86_64 "$component/Contents/MacOS/Ancient Grove"
+          mkdir -p "$HOME/Library/Audio/Plug-Ins/Components"
+          ditto "$component" "$HOME/Library/Audio/Plug-Ins/Components/Ancient Grove.component"
+          killall AudioComponentRegistrar || true
+          sleep 5
+          auval -v aumu Ag01 LmLy 2>&1 | tee auval.log
+      - name: Package component and instructions
+        run: |
+          mkdir -p release
+          ditto "build-au/AncientGrove_artefacts/Release/AU/Ancient Grove.component" "release/Ancient Grove.component"
+          cp native-au/AU-README.md release/README.md
+          cp auval.log release/auval.log
+          ditto -c -k --sequesterRsrc --keepParent release Ancient-Grove-AU-macOS.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Ancient-Grove-AU-macOS
+          path: Ancient-Grove-AU-macOS.zip
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: AU-diagnostics
+          path: auval.log
+          if-no-files-found: ignore
