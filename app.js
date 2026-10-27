@@ -13,9 +13,45 @@ function drawKeys(){const keyboard=$('keyboard');keyboard.replaceChildren();cons
 function drawSteps(){const steps=$('steps');steps.replaceChildren();pattern.forEach((n,i)=>{const b=document.createElement('button');b.className='step'+(n?' filled':'')+(recording&&i===cursor?' cursor':'');const small=document.createElement('small');small.textContent=String(i+1).padStart(2,'0');b.append(small,document.createTextNode(n?noteName(n.midi):'—'));b.title=n?(presets.find(p=>p.id===n.instrument)?.name||'내 샘플')+' · 누르면 비우기':'쉼표 · 누르면 입력 위치 선택';b.onclick=()=>{if(n){pattern[i]=null;persist();}cursor=i;drawSteps();};steps.append(b);});$('patternCount').textContent=pattern.filter(Boolean).length+' / 16 음';}
 function impulse(c){const b=c.createBuffer(2,c.sampleRate*1.7,c.sampleRate);let seed=83;for(let ch=0;ch<2;ch++){const d=b.getChannelData(ch);for(let i=0;i<d.length;i++){seed=(seed*16807)%2147483647;d[i]=(seed/1073741824-1)*Math.pow(1-i/d.length,3)*.35;}}return b;}
 async function start(){if(!ctx){ctx=new(window.AudioContext||window.webkitAudioContext)();master=ctx.createGain();master.gain.value=Number($('volume').value)/100;master.connect(ctx.destination);convolver=ctx.createConvolver();convolver.buffer=impulse(ctx);wet=ctx.createGain();wet.gain.value=Number($('room').value)/100;convolver.connect(wet).connect(master);}await ctx.resume();$('power').textContent='♫ 소리 준비됨';status('준비됐어. 건반으로 선율을 만들어 봐.');}
-function makeSample(c,id){const rate=c.sampleRate;const duration=id==='harp'?3.5:2.4,b=c.createBuffer(1,Math.ceil(rate*duration),rate),d=b.getChannelData(0),f=261.625565;const amps=id==='lute'?[1,.5,.28,.16,.1,.05]:id==='harp'?[1,.28,.38,.1,.08]:id==='recorder'?[1,.08,.17,.03,.04]:id==='vielle'?[1,.55,.35,.23,.19,.14,.11,.08,.06]:[1,.26,.42,.24,.12,.2,.08,.1];let peak=0;for(let i=0;i<d.length;i++){let t=i/rate;const pluck=id==='harp'||id==='lute',attack=pluck?.006:id==='choir'?.22:.09;let env=Math.min(1,t/attack)*(pluck?Math.exp(-t*(id==='lute'?3:1.8)):Math.min(1,(duration-t)/.4)*Math.exp(-t*.6));let v=0;for(let h=0;h<amps.length;h++){const vib=!pluck?1+.0025*Math.sin(t*2*Math.PI*5):1;const harmonic=(h+1);v+=amps[h]*Math.sin(2*Math.PI*f*harmonic*t*vib)*(pluck?Math.exp(-t*h*1.2):1);if(id==='choir')v+=amps[h]*.35*Math.sin(2*Math.PI*f*harmonic*1.003*t);}d[i]=v*env;peak=Math.max(peak,Math.abs(d[i]));}for(let i=0;i<d.length;i++)d[i]=d[i]/peak*.45;return b;}
-function buffer(c,id){if(id==='custom')return custom?.buffer;const key=id+c.sampleRate;if(!cache.has(key))cache.set(key,makeSample(c,id));return cache.get(key);}
-function sound(c,dry,reverb,id,midi,when){const b=buffer(c,id);if(!b)return;const source=c.createBufferSource(),gain=c.createGain();source.buffer=b;source.playbackRate.value=Math.pow(2,(midi-60)/12);source.connect(gain);gain.gain.setValueAtTime(0,when);gain.gain.linearRampToValueAtTime(.65,when+.005);const duration=Math.min(b.duration/source.playbackRate.value,5);gain.gain.setValueAtTime(.65,when+Math.max(.01,duration-.04));gain.gain.linearRampToValueAtTime(0,when+duration);gain.connect(dry);if(reverb)gain.connect(reverb);source.start(when);source.stop(when+duration+.01);if(c===ctx){voices.add(source);source.onended=()=>{voices.delete(source);source.disconnect();gain.disconnect();};}return source;}
+// Integrate vibrato in phase; multiplying time by vibrato makes pitch drift grow.
+function makeSample(c,id,midi=60){
+ const rate=c.sampleRate,pluck=id==='lute'||id==='harp';
+ const duration=pluck?(id==='harp'?3.5:2.4):1.8;
+ const b=c.createBuffer(1,Math.ceil(rate*duration),rate),d=b.getChannelData(0);
+ const f=pluck?261.625565:440*Math.pow(2,(midi-69)/12);
+ const amps=id==='lute'?[1,.5,.28,.16,.1,.05]:id==='harp'?[1,.28,.38,.1,.08]:id==='recorder'?[1,.035,.11,.012,.018]:id==='vielle'?[1,.34,.19,.11,.065,.04,.025,.014]:null;
+ const voicesCount=id==='choir'?3:1;
+ const phases=new Float64Array(voicesCount),detune=[0,-.002,.002];
+ const harmonics=amps?amps.length:Math.min(28,Math.floor(rate*.42/f));
+ const weights=Array.from({length:harmonics},(_,h)=>{
+  if(amps)return amps[h];
+  const hz=f*(h+1);
+  // A gentle oo/ah-like spectral envelope, without recorded human voices.
+  return (.18+.85*Math.exp(-.5*Math.pow((hz-650)/190,2))+.5*Math.exp(-.5*Math.pow((hz-1150)/240,2))+.15*Math.exp(-.5*Math.pow((hz-2500)/350,2)))/(h+1);
+ });
+ let peak=0;
+ for(let i=0;i<d.length;i++){
+  const t=i/rate,attack=pluck?.006:id==='recorder'?.045:id==='vielle'?.12:.2;
+  const release=pluck?1:Math.min(1,(duration-t)/.32);
+  const envelope=Math.min(1,t/attack)*(pluck?Math.exp(-t*(id==='lute'?3:1.8)):release*(.88+.12*Math.exp(-t*3)));
+  let value=0;
+  for(let voice=0;voice<voicesCount;voice++){
+   const depth=pluck?0:id==='recorder'?.00065:.0015;
+   const vibrato=depth*Math.min(1,t/.35)*Math.sin(2*Math.PI*(id==='recorder'?4.8:5.1)*t+voice*.7);
+   phases[voice]=(phases[voice]+2*Math.PI*f*(1+detune[voice]+vibrato)/rate)%(2*Math.PI);
+   for(let h=0;h<harmonics;h++){
+    if(f*(h+1)>rate*.42)continue;
+    value+=weights[h]*Math.sin(phases[voice]*(h+1))*(pluck?Math.exp(-t*h*1.2):1)/voicesCount;
+   }
+  }
+  d[i]=value*envelope;peak=Math.max(peak,Math.abs(d[i]));
+ }
+ const level=pluck?.45:id==='recorder'?.36:.34;
+ if(peak>0)for(let i=0;i<d.length;i++)d[i]=d[i]/peak*level;
+ return b;
+}
+function buffer(c,id,midi=60){if(id==='custom')return custom?.buffer;const pitched=!['lute','harp'].includes(id),key=id+':'+c.sampleRate+':'+(pitched?midi:60);if(!cache.has(key))cache.set(key,makeSample(c,id,midi));return cache.get(key);}
+function sound(c,dry,reverb,id,midi,when){const b=buffer(c,id,midi);if(!b)return;const source=c.createBufferSource(),gain=c.createGain();source.buffer=b;source.playbackRate.value=['custom','lute','harp'].includes(id)?Math.pow(2,(midi-60)/12):1;source.connect(gain);gain.gain.setValueAtTime(0,when);gain.gain.linearRampToValueAtTime(.65,when+.005);const duration=Math.min(b.duration/source.playbackRate.value,5);gain.gain.setValueAtTime(.65,when+Math.max(.01,duration-.04));gain.gain.linearRampToValueAtTime(0,when+duration);gain.connect(dry);if(reverb)gain.connect(reverb);source.start(when);source.stop(when+duration+.01);if(c===ctx){voices.add(source);source.onended=()=>{voices.delete(source);source.disconnect();gain.disconnect();};}return source;}
 async function playNote(semitone){try{await start();const midi=(Number($('octave').value)+1)*12+semitone;sound(ctx,master,convolver,selected,midi,ctx.currentTime);status((presets.find(p=>p.id===selected)?.name||'내 샘플')+' · '+noteName(midi));if(recording){pattern[cursor]={instrument:selected,midi};cursor=(cursor+1)%16;persist();drawSteps();}}catch(e){status('소리를 시작할 수 없어. 브라우저의 오디오 설정을 확인해 줘.');}}
 function stop(){playing=false;clearInterval(timer);highlightTimers.forEach(clearTimeout);highlightTimers=[];voices.forEach(v=>{try{v.stop();}catch{}});$('play').textContent='▶ 재생';document.querySelectorAll('.step').forEach(s=>s.classList.remove('playing'));}
 function tick(){while(nextTime<ctx.currentTime+.12){const i=playIndex,n=pattern[i],at=nextTime;if(n)sound(ctx,master,convolver,n.instrument,n.midi,at);highlightTimers=highlightTimers.filter(t=>t);const t=setTimeout(()=>{if(playing){document.querySelectorAll('.step').forEach((s,j)=>s.classList.toggle('playing',i===j));}},Math.max(0,(at-ctx.currentTime)*1000));highlightTimers.push(t);if(highlightTimers.length>40)highlightTimers.splice(0,20);nextTime+=60/tempo()/2;playIndex=(playIndex+1)%16;}}
